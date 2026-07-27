@@ -42,6 +42,8 @@ class AutoRemoveInactive(_PluginBase):
     _inactive_minutes: int = 30
     _delete_files_enabled: bool = True
     _delete_file_threshold_minutes: int = 30
+    _include_tags: List[str] = []
+    _exclude_tags: List[str] = []
     _running: bool = False
 
     # ---------------- 生命周期 ---------------- #
@@ -87,6 +89,9 @@ class AutoRemoveInactive(_PluginBase):
             ))
         except (TypeError, ValueError):
             self._delete_file_threshold_minutes = 30
+        # 标签过滤：换行 / 逗号都支持，解析为 list[str]（去重、去空）
+        self._include_tags = self._parse_tag_list(config.get("include_tags"))
+        self._exclude_tags = self._parse_tag_list(config.get("exclude_tags"))
 
         # 修正历史脏数据：前端 form 提交时会把 bool/int 字段保存成字符串，
         # 且 downloaders 会被某层序列化成 {"item": "..."} dict。这里主动 merge 写回标准类型，
@@ -267,6 +272,37 @@ class AutoRemoveInactive(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{"component": "VTextarea", "props": {
+                                    "model": "include_tags",
+                                    "label": "只处理包含以下标签的种子",
+                                    "placeholder": "每行一个标签，或用逗号分隔。留空则处理所有种子。",
+                                    "rows": 2,
+                                    "noResize": True,
+                                    "hint": "支持 qBittorrent 与 Transmission 标签（tr 标签需在 MP 中标记）",
+                                    "persistentHint": True,
+                                }}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{"component": "VTextarea", "props": {
+                                    "model": "exclude_tags",
+                                    "label": "排除含以下标签的种子",
+                                    "placeholder": "每行一个标签，或用逗号分隔。",
+                                    "rows": 2,
+                                    "noResize": True,
+                                    "hint": "例如排除 \"重要\" 标签，防止误删需要长期做种的内容",
+                                    "persistentHint": True,
+                                }}],
+                            },
+                        ],
+                    },
+                    {
                         "component": "VAlert",
                         "props": {
                             "type": "info",
@@ -277,7 +313,9 @@ class AutoRemoveInactive(_PluginBase):
                                 "其他文件路径重叠的种子（辅种），有则只删种不删文件；"
                                 "无则按需同步删文件。\n"
                                 "删文件阈值：仅在无辅种时生效。无活动超过此时长才允许删文件，"
-                                "防止误删。"
+                                "防止误删。\n"
+                                "标签过滤：先按\"包含标签\"白名单筛种，再按\"排除标签\"黑名单过滤。"
+                                "种子命中任一包含标签且不命中任何排除标签才会被处理。"
                             ),
                         },
                     },
@@ -292,6 +330,8 @@ class AutoRemoveInactive(_PluginBase):
             "inactive_minutes": 30,
             "delete_files_enabled": True,
             "delete_file_threshold_minutes": 30,
+            "include_tags": "",
+            "exclude_tags": "",
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -392,6 +432,9 @@ class AutoRemoveInactive(_PluginBase):
             last_act = self._get_last_activity(t, is_qb)
             if not h or not last_act or last_act > inactive_threshold:
                 continue
+            # 标签过滤：含/排除标签都没命中时跳过
+            if not self._passes_tag_filter(self._get_tags(t, is_qb)):
+                continue
             my_files = file_index.get(h, set())
             overlap_hashes: List[str] = []
             if my_files:
@@ -469,6 +512,57 @@ class AutoRemoveInactive(_PluginBase):
             if name:
                 names.append(str(name))
         return names
+
+    @staticmethod
+    def _get_tags(torrent: Any, is_qb: bool) -> List[str]:
+        """统一取种子标签列表（已 trim + 去空）。"""
+        raw: Any = None
+        if is_qb:
+            raw = torrent.get("tags") if hasattr(torrent, "get") else None
+            # qb 的 tags 是字符串 "a, b, c"，可能为空字符串
+        else:
+            raw = getattr(torrent, "labels", None) or []
+            # tr 的 labels 是 list[str]
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            parts = raw.split(",")
+        else:
+            try:
+                parts = list(raw)
+            except TypeError:
+                return []
+        return [str(p).strip() for p in parts if str(p).strip()]
+
+    @staticmethod
+    def _parse_tag_list(value: Any) -> List[str]:
+        """从字符串（换行 / 逗号分隔）解析标签列表，去重保留顺序。"""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            candidates = []
+            for item in value:
+                candidates.extend(str(item).replace(",", "\n").splitlines())
+        else:
+            text = str(value)
+            candidates = text.replace(",", "\n").splitlines()
+        seen: set = set()
+        result: List[str] = []
+        for item in candidates:
+            t = item.strip()
+            if t and t not in seen:
+                seen.add(t)
+                result.append(t)
+        return result
+
+    def _passes_tag_filter(self, torrent_tags: List[str]) -> bool:
+        """判断种子是否通过标签过滤。"""
+        tag_set = set(torrent_tags or [])
+        if self._include_tags and not (tag_set & set(self._include_tags)):
+            return False
+        if self._exclude_tags and (tag_set & set(self._exclude_tags)):
+            return False
+        return True
 
     # ---------------- 通知 ---------------- #
     def _send_notify(self, results: List[Dict[str, Any]]) -> None:
