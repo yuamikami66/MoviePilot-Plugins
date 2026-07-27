@@ -6,8 +6,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
@@ -38,27 +36,36 @@ class AutoRemoveInactive(_PluginBase):
 
     # ---------------- 私有属性 ---------------- #
     _enabled: bool = False
-    _onlyonce: bool = False
     _notify: bool = True
     _cron: str = "*/20 * * * *"
     _downloaders: List[str] = []
     _inactive_minutes: int = 30
     _delete_files_enabled: bool = True
     _delete_file_threshold_minutes: int = 30
-    _scheduler: Optional[BackgroundScheduler] = None
     _running: bool = False
 
     # ---------------- 生命周期 ---------------- #
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
-        self.stop_service()
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
-        self._onlyonce = bool(config.get("onlyonce"))
         self._notify = bool(config.get("notify", True))
         self._cron = (config.get("cron") or "*/20 * * * *").strip()
-        self._downloaders = config.get("downloaders") or []
+        # 兼容 list / dict / 单值 - 插件持久化时可能改变类型
+        raw_downloaders = config.get("downloaders")
+        if raw_downloaders is None:
+            self._downloaders = []
+        elif isinstance(raw_downloaders, dict):
+            # 形如 {"item": "qb刷流"} - 取所有 string 值
+            self._downloaders = [str(v) for v in raw_downloaders.values() if v]
+        elif isinstance(raw_downloaders, str):
+            self._downloaders = [raw_downloaders]
+        else:
+            try:
+                self._downloaders = [str(x) for x in raw_downloaders if x]
+            except TypeError:
+                self._downloaders = []
         try:
             self._inactive_minutes = max(1, int(config.get("inactive_minutes") or 30))
         except (TypeError, ValueError):
@@ -71,47 +78,47 @@ class AutoRemoveInactive(_PluginBase):
         except (TypeError, ValueError):
             self._delete_file_threshold_minutes = 30
 
-        # 关闭 onlyonce 标志
-        if self._onlyonce:
-            self._onlyonce = False
-            self.update_config(config)
-
-        self._scheduler = BackgroundScheduler(timezone=settings.TZ)
-
-        # 立即运行一次（onlyonce 已被关闭，这里强制安排一次）
-        if config.get("onlyonce"):
-            try:
-                self._scheduler.add_job(
-                    func=self._safe_run,
-                    trigger="date",
-                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                    name="AutoRemoveInactive 立即运行",
-                )
-            except Exception as err:
-                logger.error(f"AutoRemoveInactive 注册立即运行任务失败: {err}")
-
-        # 注册定时任务
         if self._enabled and self._downloaders and self._cron:
-            try:
-                self._scheduler.add_job(
-                    func=self._safe_run,
-                    trigger=CronTrigger.from_crontab(self._cron, timezone=settings.TZ),
-                    name="AutoRemoveInactive 定时任务",
-                )
-                self._scheduler.start()
-                logger.info(
-                    f"AutoRemoveInactive 定时任务已注册: cron={self._cron} "
-                    f"下载器={self._downloaders} 阈值={self._inactive_minutes}分钟"
-                )
-            except Exception as err:
-                logger.error(f"AutoRemoveInactive 启动定时任务失败: {err}")
-                self._scheduler = None
-        else:
-            if not self._enabled:
-                logger.info("AutoRemoveInactive 未启用")
-            elif not self._downloaders:
-                logger.info("AutoRemoveInactive 未配置下载器")
-            self._scheduler = None
+            logger.info(
+                f"AutoRemoveInactive 已启用: cron={self._cron} "
+                f"下载器={self._downloaders} 阈值={self._inactive_minutes}分钟"
+            )
+        elif not self._enabled:
+            logger.info("AutoRemoveInactive 未启用")
+        elif not self._downloaders:
+            logger.info("AutoRemoveInactive 未配置下载器")
+
+    def get_state(self) -> bool:
+        """获取插件启用状态。"""
+        return self._enabled
+
+    @staticmethod
+    def get_command() -> List[Dict[str, Any]]:
+        """返回插件远程命令列表。"""
+        return []
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        """返回插件 API 列表。"""
+        return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """注册插件公共服务（由 MoviePilot 调度器管理）。"""
+        if not (self._enabled and self._downloaders and self._cron):
+            return []
+        try:
+            trigger = CronTrigger.from_crontab(self._cron, timezone=settings.TZ)
+        except Exception as err:
+            logger.error(f"AutoRemoveInactive 解析 cron 失败: {err}")
+            return []
+        return [
+            {
+                "id": "AutoRemoveInactive",
+                "name": "30分钟无活动自动清理",
+                "trigger": trigger,
+                "func": self._safe_run,
+                "kwargs": {},
+            }
+        ]
 
     def get_state(self) -> bool:
         """获取插件启用状态。"""
@@ -130,8 +137,8 @@ class AutoRemoveInactive(_PluginBase):
         """返回插件配置表单与默认配置。"""
         downloader_options: List[dict] = []
         try:
-            for d in DownloaderHelper().get_downloaders() or []:
-                downloader_options.append({"title": d.name, "value": d.name})
+            for cfg in DownloaderHelper().get_configs().values():
+                downloader_options.append({"title": cfg.name, "value": cfg.name})
         except Exception as err:
             logger.warning(f"AutoRemoveInactive 拉取下载器列表失败: {err}")
 
@@ -256,14 +263,8 @@ class AutoRemoveInactive(_PluginBase):
         return None
 
     def stop_service(self) -> None:
-        """停止插件后台服务。"""
-        try:
-            if self._scheduler:
-                self._scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        finally:
-            self._scheduler = None
+        """停止插件后台服务（由 MP 调度器管理，无须手动停止）。"""
+        return None
 
     # ---------------- 执行入口 ---------------- #
     def _safe_run(self) -> None:
