@@ -49,8 +49,18 @@ class AutoRemoveInactive(_PluginBase):
         """根据插件配置初始化运行状态。"""
         if not config:
             return
-        self._enabled = bool(config.get("enabled"))
-        self._notify = bool(config.get("notify", True))
+        # 严格 bool 解析：字符串 "false" 必须判为 False（bool("false") == True 是 BUG）
+        def to_bool(v, default=False):
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                return v.strip().lower() in ("true", "1", "yes", "on")
+            if v is None:
+                return default
+            return bool(v)
+
+        self._enabled = to_bool(config.get("enabled"))
+        self._notify = to_bool(config.get("notify", True))
         self._cron = (config.get("cron") or "*/20 * * * *").strip()
         # 兼容 list / dict / 单值 - 插件持久化时可能改变类型
         raw_downloaders = config.get("downloaders")
@@ -66,29 +76,43 @@ class AutoRemoveInactive(_PluginBase):
                 self._downloaders = [str(x) for x in raw_downloaders if x]
             except TypeError:
                 self._downloaders = []
-        # 修正历史脏数据：如果是 dict 形式被持久化，主动写回 list，让前端 VSelect 重新可用
-        if isinstance(raw_downloaders, dict) and self._downloaders:
-            try:
-                # 注意：self.update_config 是整体覆盖，这里必须 merge 现有 config
-                current = self.get_config() or {}
-                current["downloaders"] = self._downloaders
-                self.update_config(current)
-                logger.info(
-                    f"AutoRemoveInactive 已修正 downloaders 字段: {raw_downloaders} -> {self._downloaders}"
-                )
-            except Exception as err:
-                logger.warning(f"AutoRemoveInactive 修正 downloaders 失败: {err}")
         try:
             self._inactive_minutes = max(1, int(config.get("inactive_minutes") or 30))
         except (TypeError, ValueError):
             self._inactive_minutes = 30
-        self._delete_files_enabled = bool(config.get("delete_files_enabled", True))
+        self._delete_files_enabled = to_bool(config.get("delete_files_enabled", True))
         try:
             self._delete_file_threshold_minutes = max(1, int(
                 config.get("delete_file_threshold_minutes") or 30
             ))
         except (TypeError, ValueError):
             self._delete_file_threshold_minutes = 30
+
+        # 修正历史脏数据：前端 form 提交时会把 bool/int 字段保存成字符串，
+        # 且 downloaders 会被某层序列化成 {"item": "..."} dict。这里主动 merge 写回标准类型，
+        # 让前端 VSwitch/VSelect/VTextField 能正常显示。
+        normalized: Dict[str, Any] = {}
+        for key in ("enabled", "notify", "delete_files_enabled"):
+            raw = config.get(key)
+            if isinstance(raw, str):
+                normalized[key] = to_bool(raw, default=False)
+        if isinstance(raw_downloaders, dict) and self._downloaders:
+            normalized["downloaders"] = self._downloaders
+        for key, current in (("inactive_minutes", self._inactive_minutes),
+                             ("delete_file_threshold_minutes", self._delete_file_threshold_minutes)):
+            if isinstance(config.get(key), str) and not isinstance(config.get(key), bool):
+                normalized[key] = current
+        if normalized:
+            try:
+                # 注意：self.update_config 是整体覆盖，这里必须 merge 现有 config
+                current = self.get_config() or {}
+                current.update(normalized)
+                self.update_config(current)
+                logger.info(
+                    f"AutoRemoveInactive 已规范化配置字段: {normalized}"
+                )
+            except Exception as err:
+                logger.warning(f"AutoRemoveInactive 规范化配置失败: {err}")
 
         if self._enabled and self._downloaders and self._cron:
             logger.info(
