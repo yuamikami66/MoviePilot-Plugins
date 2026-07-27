@@ -66,6 +66,18 @@ class AutoRemoveInactive(_PluginBase):
                 self._downloaders = [str(x) for x in raw_downloaders if x]
             except TypeError:
                 self._downloaders = []
+        # 修正历史脏数据：如果是 dict 形式被持久化，主动写回 list，让前端 VSelect 重新可用
+        if isinstance(raw_downloaders, dict) and self._downloaders:
+            try:
+                # 注意：self.update_config 是整体覆盖，这里必须 merge 现有 config
+                current = self.get_config() or {}
+                current["downloaders"] = self._downloaders
+                self.update_config(current)
+                logger.info(
+                    f"AutoRemoveInactive 已修正 downloaders 字段: {raw_downloaders} -> {self._downloaders}"
+                )
+            except Exception as err:
+                logger.warning(f"AutoRemoveInactive 修正 downloaders 失败: {err}")
         try:
             self._inactive_minutes = max(1, int(config.get("inactive_minutes") or 30))
         except (TypeError, ValueError):
