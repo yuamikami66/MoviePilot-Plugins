@@ -1,0 +1,15 @@
+{
+  "AutoRemoveInactive": {
+    "name": "30分钟无活动自动清理",
+    "description": "自动删除下载器中长时间无活动的种子，存在其他辅种时仅删种不删文件。支持 qBittorrent 和 Transmission。",
+    "labels": "下载器",
+    "version": "1.0.0",
+    "icon": "autoremoveinactive.png",
+    "author": "jay",
+    "level": 1,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.0.0": "初始版本：30 分钟无活动自动清理，支持多下载器、跨种子 overlap 判定、JSON 配置 + 通知"
+    }
+  }
+}
