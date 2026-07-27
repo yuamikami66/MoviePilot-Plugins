@@ -25,9 +25,11 @@ class AutoRemoveInactive(_PluginBase):
     """
 
     plugin_name = "种子自动删除"
-    plugin_desc = "自动删除下载器中长时间无活动的种子，存在其他辅种时仅删种不删文件"
-    plugin_icon = "cleanup.png"
+    plugin_desc = "自动删除下载器中长时间无活动的种子；存在其他辅种时仅删种不删文件。支持标签过滤（包含/排除）。"
+    plugin_icon = "autoremoveinactive.png"
     plugin_version = "1.0.0"
+    plugin_label = "下载器"
+    author_url = "https://github.com/yuamikami66/MoviePilot-Plugins"
     plugin_author = "jay"
     author_url = "https://github.com/jay/MoviePilot-Plugins"
     plugin_config_prefix = "autoremoveinactive_"
