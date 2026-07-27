@@ -339,6 +339,9 @@ class AutoRemoveInactive(_PluginBase):
                     "deleted_only": 0, "error": str(err),
                 })
 
+        # 记录运行统计，供 get_page 详情页展示
+        self._record_run_stats(results)
+
         if self._notify and results:
             self._send_notify(results)
 
@@ -498,3 +501,194 @@ class AutoRemoveInactive(_PluginBase):
             )
         except Exception as err:
             logger.error(f"AutoRemoveInactive 发送通知失败: {err}")
+
+    # ---------------- 统计 & 详情页 ---------------- #
+    _STATS_KEY = "stats"
+    _STATS_RECENT_LIMIT = 20
+
+    def _record_run_stats(self, results: List[Dict[str, Any]]) -> None:
+        """累计本次运行的删除数到持久化统计中。"""
+        total_with = sum(r.get("deleted_with_file", 0) for r in results)
+        total_only = sum(r.get("deleted_only", 0) for r in results)
+        total_deleted = total_with + total_only
+        total_files = total_with  # 仅"删种+删文件"路径会同时删文件
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        by_downloader: Dict[str, int] = {}
+        by_downloader_files: Dict[str, int] = {}
+        for r in results:
+            name = r.get("downloader") or "?"
+            deleted = int(r.get("deleted_with_file", 0)) + int(r.get("deleted_only", 0))
+            files = int(r.get("deleted_with_file", 0))
+            by_downloader[name] = by_downloader.get(name, 0) + deleted
+            by_downloader_files[name] = by_downloader_files.get(name, 0) + files
+
+        try:
+            stats = self.get_data(self._STATS_KEY) or {}
+            if not isinstance(stats, dict):
+                stats = {}
+            stats["total_deleted"] = int(stats.get("total_deleted", 0)) + total_deleted
+            stats["total_files_deleted"] = int(stats.get("total_files_deleted", 0)) + total_files
+            stats["total_runs"] = int(stats.get("total_runs", 0)) + 1
+
+            merged_dl = dict(stats.get("by_downloader", {}) or {})
+            for k, v in by_downloader.items():
+                merged_dl[k] = int(merged_dl.get(k, 0)) + v
+            stats["by_downloader"] = merged_dl
+
+            merged_files = dict(stats.get("by_downloader_files", {}) or {})
+            for k, v in by_downloader_files.items():
+                merged_files[k] = int(merged_files.get(k, 0)) + v
+            stats["by_downloader_files"] = merged_files
+
+            stats["last_run"] = {
+                "timestamp": timestamp,
+                "deleted": total_deleted,
+                "files_deleted": total_files,
+                "by_downloader": by_downloader,
+            }
+            recent = list(stats.get("recent_runs", []) or [])
+            recent.append({
+                "timestamp": timestamp,
+                "deleted": total_deleted,
+                "files_deleted": total_files,
+            })
+            stats["recent_runs"] = recent[-self._STATS_RECENT_LIMIT:]
+
+            self.save_data(self._STATS_KEY, stats)
+            logger.info(
+                f"AutoRemoveInactive 统计已更新: 本次 {total_deleted} 条，"
+                f"累计 {stats['total_deleted']} 条 / 删文件 {stats['total_files_deleted']} 次"
+            )
+        except Exception as err:
+            logger.warning(f"AutoRemoveInactive 统计记录失败: {err}")
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, Optional[str]]:
+        """声明使用 Vuetify JSON 渲染插件详情页。"""
+        return "vuetify", None
+
+    def get_page(self) -> Optional[List[dict]]:
+        """返回插件详情页面（累计 / 各下载器 / 上次 / 下次倒计时）。"""
+        stats = {}
+        try:
+            stats = self.get_data(self._STATS_KEY) or {}
+        except Exception as err:
+            logger.warning(f"AutoRemoveInactive 读取统计失败: {err}")
+        if not isinstance(stats, dict):
+            stats = {}
+
+        total_deleted = int(stats.get("total_deleted", 0))
+        total_files = int(stats.get("total_files_deleted", 0))
+        total_runs = int(stats.get("total_runs", 0))
+        by_downloader = stats.get("by_downloader", {}) or {}
+        by_downloader_files = stats.get("by_downloader_files", {}) or {}
+        last_run = stats.get("last_run", {}) or {}
+        recent_runs = stats.get("recent_runs", []) or []
+
+        # 下次运行倒计时：从 MP 全局 scheduler 查
+        next_run_text = "未配置"
+        try:
+            from app.scheduler import Scheduler
+            sched = Scheduler()
+            jobs = sched.list() or []
+            for j in jobs:
+                jid = getattr(j, "id", "") or ""
+                if jid == "AutoRemoveInactive_AutoRemoveInactive":
+                    nr = getattr(j, "next_run", "") or ""
+                    if nr:
+                        next_run_text = str(nr)
+                    break
+        except Exception:
+            pass
+
+        def text_line(text: str, klass: str = "text-body-2 py-1") -> Dict[str, Any]:
+            return {"component": "div", "props": {"class": klass}, "text": text}
+
+        def card(title: str, subtitle: str, color: str, lines: List[str]) -> Dict[str, Any]:
+            return {
+                "component": "VCard",
+                "props": {"variant": "tonal", "color": color, "class": "h-100"},
+                "content": [
+                    {"component": "VCardTitle",
+                     "props": {"class": "text-subtitle-1 font-weight-bold pb-1"},
+                     "text": title},
+                    {"component": "VCardSubtitle",
+                     "props": {"class": "text-body-2 pb-2"},
+                     "text": subtitle},
+                    *[text_line(line) for line in lines],
+                ],
+            }
+
+        cards: List[Dict[str, Any]] = []
+
+        # 累计统计
+        cards.append(card(
+            title="累计删除",
+            subtitle=f"自启用以来共执行 {total_runs} 次",
+            color="primary",
+            lines=[
+                f"已删种子（不重复计辅种）：{total_deleted}",
+                f"同步删文件次数：{total_files}",
+            ],
+        ))
+
+        # 上次运行
+        last_text = "暂无"
+        if last_run.get("timestamp"):
+            last_text = (
+                f"{last_run['timestamp']}（"
+                f"删种 {last_run.get('deleted', 0)} 条"
+                f" / 删文件 {last_run.get('files_deleted', 0)} 条）"
+            )
+        cards.append(card(
+            title="上次运行",
+            subtitle="最近一次清理结果",
+            color="info",
+            lines=[last_text],
+        ))
+
+        # 下次运行
+        cards.append(card(
+            title="下次运行",
+            subtitle="由 MP 全局调度器计算",
+            color="success",
+            lines=[next_run_text],
+        ))
+
+        # 各下载器分布
+        if by_downloader:
+            dl_lines = []
+            for name, count in sorted(
+                by_downloader.items(), key=lambda x: x[1], reverse=True
+            ):
+                files = int(by_downloader_files.get(name, 0))
+                dl_lines.append(
+                    f"{name}：累计删种 {count} 条（同步删文件 {files} 次）"
+                )
+        else:
+            dl_lines = ["暂无数据（插件尚未实际删除过种子）"]
+        cards.append(card(
+            title="各下载器分布",
+            subtitle="按累计删除数量排序",
+            color="warning",
+            lines=dl_lines,
+        ))
+
+        return [{
+            "component": "VContainer",
+            "props": {"class": "pa-4", "fluid": True},
+            "content": [{
+                "component": "VRow",
+                "props": {"dense": True},
+                "content": [{
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 6},
+                    "content": cards[:2],
+                }, {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 6},
+                    "content": cards[2:],
+                }],
+            }],
+        }]
