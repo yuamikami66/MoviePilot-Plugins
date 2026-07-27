@@ -326,7 +326,8 @@ class AutoRemoveInactive(_PluginBase):
                 logger.warning(f"AutoRemoveInactive 找不到下载器: {name}")
                 results.append({
                     "downloader": name, "deleted_with_file": 0,
-                    "deleted_only": 0, "error": "下载器未配置或不可用",
+                    "deleted_only": 0, "matched": 0,
+                    "error": "下载器未配置或不可用",
                 })
                 continue
             try:
@@ -363,7 +364,8 @@ class AutoRemoveInactive(_PluginBase):
         if not torrents:
             return {
                 "downloader": service.name, "deleted_with_file": 0,
-                "deleted_only": 0, "with_file": [], "only": [],
+                "deleted_only": 0, "matched": 0,
+                "with_file": [], "only": [],
             }
 
         now = int(time.time())
@@ -425,6 +427,7 @@ class AutoRemoveInactive(_PluginBase):
             "downloader": service.name,
             "deleted_with_file": len(del_with_file),
             "deleted_only": len(del_only),
+            "matched": len(del_with_file) + len(del_only),
             "with_file": del_with_file,
             "only": del_only,
         }
@@ -470,33 +473,21 @@ class AutoRemoveInactive(_PluginBase):
     # ---------------- 通知 ---------------- #
     def _send_notify(self, results: List[Dict[str, Any]]) -> None:
         """推送执行结果通知。"""
-        total_with = sum(r.get("deleted_with_file", 0) for r in results)
-        total_only = sum(r.get("deleted_only", 0) for r in results)
-        if total_with == 0 and total_only == 0:
+        total_matched = sum(int(r.get("matched", 0)) for r in results)
+        total_deleted = sum(
+            int(r.get("deleted_with_file", 0)) + int(r.get("deleted_only", 0))
+            for r in results
+        )
+        if total_deleted == 0:
             return
-        lines = [
-            f"匹配阈值：删种 ≥ {self._inactive_minutes} 分钟无活动，"
-            f"删文件 ≥ {self._delete_file_threshold_minutes} 分钟无活动"
-            f"{'且无其他辅种' if self._delete_files_enabled else '（保留文件）'}",
-            f"汇总：删种+删文件 {total_with} 条 / 仅删种 {total_only} 条",
-            "",
-        ]
-        for r in results:
-            if r.get("error"):
-                lines.append(f"- {r['downloader']}: ⚠ {r['error']}")
-                continue
-            dwf = r.get("deleted_with_file", 0)
-            do = r.get("deleted_only", 0)
-            if dwf == 0 and do == 0:
-                continue
-            lines.append(
-                f"- {r['downloader']}：删种+删文件 {dwf} 条，仅删种 {do} 条"
-            )
-        text = "\n".join(lines)
+        text = (
+            f"- 匹配待清理种子：{total_matched}条\n"
+            f"- 清理种子：{total_deleted} 条"
+        )
         try:
             self.post_message(
                 mtype=NotificationType.Plugin,
-                title=f"种子自动删除 共 {total_with + total_only} 条",
+                title="种子自动删除 - 执行完成",
                 text=text[:3500],
             )
         except Exception as err:
@@ -510,6 +501,7 @@ class AutoRemoveInactive(_PluginBase):
         """累计本次运行的删除数到持久化统计中。"""
         total_with = sum(r.get("deleted_with_file", 0) for r in results)
         total_only = sum(r.get("deleted_only", 0) for r in results)
+        total_matched = sum(int(r.get("matched", 0)) for r in results)
         total_deleted = total_with + total_only
         total_files = total_with  # 仅"删种+删文件"路径会同时删文件
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -545,6 +537,7 @@ class AutoRemoveInactive(_PluginBase):
                 "timestamp": timestamp,
                 "deleted": total_deleted,
                 "files_deleted": total_files,
+                "matched": total_matched,
                 "by_downloader": by_downloader,
             }
             recent = list(stats.get("recent_runs", []) or [])
@@ -552,6 +545,7 @@ class AutoRemoveInactive(_PluginBase):
                 "timestamp": timestamp,
                 "deleted": total_deleted,
                 "files_deleted": total_files,
+                "matched": total_matched,
             })
             stats["recent_runs"] = recent[-self._STATS_RECENT_LIMIT:]
 
