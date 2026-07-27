@@ -569,8 +569,8 @@ class AutoRemoveInactive(_PluginBase):
         return "vuetify", None
 
     def get_page(self) -> Optional[List[dict]]:
-        """返回插件详情页面（累计 / 各下载器 / 上次 / 下次倒计时）。"""
-        stats = {}
+        """返回插件详情页面。"""
+        stats: Dict[str, Any] = {}
         try:
             stats = self.get_data(self._STATS_KEY) or {}
         except Exception as err:
@@ -581,20 +581,19 @@ class AutoRemoveInactive(_PluginBase):
         total_deleted = int(stats.get("total_deleted", 0))
         total_files = int(stats.get("total_files_deleted", 0))
         total_runs = int(stats.get("total_runs", 0))
-        by_downloader = stats.get("by_downloader", {}) or {}
-        by_downloader_files = stats.get("by_downloader_files", {}) or {}
-        last_run = stats.get("last_run", {}) or {}
-        recent_runs = stats.get("recent_runs", []) or []
+        by_downloader: Dict[str, int] = stats.get("by_downloader", {}) or {}
+        by_downloader_files: Dict[str, int] = stats.get("by_downloader_files", {}) or {}
+        last_run: Dict[str, Any] = stats.get("last_run", {}) or {}
+        recent_runs: List[Dict[str, Any]] = stats.get("recent_runs", []) or []
+        cron = (self._cron or "").strip() or "未配置"
 
-        # 下次运行倒计时：从 MP 全局 scheduler 查
+        # 下次运行：从 MP 全局 scheduler 查
         next_run_text = "未配置"
         try:
             from app.scheduler import Scheduler
             sched = Scheduler()
-            jobs = sched.list() or []
-            for j in jobs:
-                jid = getattr(j, "id", "") or ""
-                if jid == "AutoRemoveInactive_AutoRemoveInactive":
+            for j in sched.list() or []:
+                if getattr(j, "id", "") == "AutoRemoveInactive_AutoRemoveInactive":
                     nr = getattr(j, "next_run", "") or ""
                     if nr:
                         next_run_text = str(nr)
@@ -602,93 +601,303 @@ class AutoRemoveInactive(_PluginBase):
         except Exception:
             pass
 
-        def text_line(text: str, klass: str = "text-body-2 py-1") -> Dict[str, Any]:
-            return {"component": "div", "props": {"class": klass}, "text": text}
+        monitored_count = len(self._downloaders or [])
 
-        def card(title: str, subtitle: str, color: str, lines: List[str]) -> Dict[str, Any]:
+        def _stat_card(value: Any, label: str, color: str,
+                       sublabel: str = "") -> Dict[str, Any]:
+            """大数字统计卡。"""
             return {
                 "component": "VCard",
                 "props": {"variant": "tonal", "color": color, "class": "h-100"},
+                "content": [{
+                    "component": "VCardText",
+                    "props": {"class": "d-flex flex-column align-center justify-center pa-6"},
+                    "content": [
+                        {"component": "div",
+                         "props": {"class": f"text-h2 font-weight-bold text-{color}"},
+                         "text": str(value)},
+                        {"component": "div",
+                         "props": {"class": "text-subtitle-2 text-medium-emphasis mt-1"},
+                         "text": label},
+                        {"component": "div",
+                         "props": {"class": "text-caption text-disabled mt-2"},
+                         "text": sublabel} if sublabel else {
+                         "component": "div",
+                         "props": {"class": "d-none"},
+                         "text": ""},
+                    ],
+                }],
+            }
+
+        def _time_card(title: str, icon_color: str, lines: List[Dict[str, str]]) -> Dict[str, Any]:
+            return {
+                "component": "VCard",
+                "props": {"variant": "outlined", "class": "h-100"},
                 "content": [
                     {"component": "VCardTitle",
-                     "props": {"class": "text-subtitle-1 font-weight-bold pb-1"},
-                     "text": title},
-                    {"component": "VCardSubtitle",
-                     "props": {"class": "text-body-2 pb-2"},
-                     "text": subtitle},
-                    *[text_line(line) for line in lines],
+                     "props": {"class": f"text-subtitle-1 font-weight-bold d-flex align-center text-{icon_color}"},
+                     "content": [
+                         {"component": "VIcon",
+                          "props": {"size": "small", "class": "mr-2"},
+                          "text": "mdi-clock-outline"},
+                         {"component": "span", "text": title},
+                     ]},
+                    {"component": "VDivider"},
+                    {"component": "VCardText",
+                     "props": {"class": "pa-4"},
+                     "content": lines},
                 ],
             }
 
-        cards: List[Dict[str, Any]] = []
+        def _info_line(klass: str, text: str) -> Dict[str, Any]:
+            return {"component": "div", "props": {"class": klass}, "text": text}
 
-        # 累计统计
-        cards.append(card(
-            title="累计删除",
-            subtitle=f"自启用以来共执行 {total_runs} 次",
-            color="primary",
-            lines=[
-                f"已删种子（不重复计辅种）：{total_deleted}",
-                f"同步删文件次数：{total_files}",
-            ],
-        ))
+        # --- 1. 顶部 4 个大数字卡 ---
+        stat_cards = [
+            _stat_card(total_deleted, "累计删除种子", "primary",
+                       f"覆盖 {len(by_downloader)} 个下载器" if by_downloader else "尚无数据"),
+            _stat_card(total_files, "同步删除文件", "error",
+                       "仅统计无辅种时的实际删文件数"),
+            _stat_card(total_runs, "运行次数", "info",
+                       f"定时 {cron}"),
+            _stat_card(monitored_count, "监控下载器", "success",
+                       "、".join(self._downloaders) if self._downloaders else "未配置"),
+        ]
 
-        # 上次运行
-        last_text = "暂无"
+        # --- 2. 上次 / 下次运行卡 ---
         if last_run.get("timestamp"):
-            last_text = (
-                f"{last_run['timestamp']}（"
+            last_text = last_run["timestamp"]
+            last_delta = self._humanize_delta(last_run["timestamp"])
+            last_stats_text = (
                 f"删种 {last_run.get('deleted', 0)} 条"
-                f" / 删文件 {last_run.get('files_deleted', 0)} 条）"
+                f" / 删文件 {last_run.get('files_deleted', 0)} 条"
             )
-        cards.append(card(
-            title="上次运行",
-            subtitle="最近一次清理结果",
-            color="info",
-            lines=[last_text],
-        ))
-
-        # 下次运行
-        cards.append(card(
-            title="下次运行",
-            subtitle="由 MP 全局调度器计算",
-            color="success",
-            lines=[next_run_text],
-        ))
-
-        # 各下载器分布
-        if by_downloader:
-            dl_lines = []
-            for name, count in sorted(
-                by_downloader.items(), key=lambda x: x[1], reverse=True
-            ):
-                files = int(by_downloader_files.get(name, 0))
-                dl_lines.append(
-                    f"{name}：累计删种 {count} 条（同步删文件 {files} 次）"
-                )
+            last_content = [
+                _info_line("text-h4 font-weight-medium", last_text),
+                _info_line("text-caption text-medium-emphasis mt-1", last_delta),
+                _info_line("text-body-2 text-primary mt-3", last_stats_text),
+            ]
         else:
-            dl_lines = ["暂无数据（插件尚未实际删除过种子）"]
-        cards.append(card(
-            title="各下载器分布",
-            subtitle="按累计删除数量排序",
-            color="warning",
-            lines=dl_lines,
-        ))
+            last_content = [
+                _info_line("text-body-1 text-medium-emphasis", "暂无运行记录"),
+            ]
+        last_card = _time_card("上次运行", "info", last_content)
 
+        next_content = [
+            _info_line("text-h4 font-weight-medium text-success", next_run_text),
+            _info_line("text-caption text-medium-emphasis mt-1", f"Cron: {cron}"),
+        ]
+        next_card = _time_card("下次运行", "success", next_content)
+
+        # --- 3. 各下载器分布 ---
+        if by_downloader:
+            sorted_dl = sorted(by_downloader.items(), key=lambda x: x[1], reverse=True)
+            total_for_bar = max(total_deleted, 1)
+            list_items: List[Dict[str, Any]] = []
+            for name, count in sorted_dl:
+                pct = round(count * 100.0 / total_for_bar, 1)
+                files = int(by_downloader_files.get(name, 0))
+                list_items.append({
+                    "component": "VListItem",
+                    "props": {"class": "px-2"},
+                    "content": [
+                        {"component": "VListItemTitle",
+                         "props": {"class": "d-flex align-center justify-space-between"},
+                         "content": [
+                             {"component": "span",
+                              "props": {"class": "text-body-1 font-weight-medium"},
+                              "text": name},
+                             {"component": "div",
+                              "content": [
+                                  {"component": "VChip",
+                                   "props": {"size": "small", "color": "primary",
+                                             "variant": "tonal", "class": "mr-2"},
+                                   "text": f"删种 {count}"},
+                                  {"component": "VChip",
+                                   "props": {"size": "small", "color": "error",
+                                             "variant": "tonal"},
+                                   "text": f"删文件 {files}"},
+                              ]},
+                         ]},
+                        {"component": "VListItemSubtitle",
+                         "props": {"class": "mt-2"},
+                         "content": [
+                             {"component": "VProgressLinear",
+                              "props": {"modelValue": pct, "color": "primary",
+                                        "height": 6, "rounded": True,
+                                        "class": "mt-1"},
+                              "text": f"{pct}%"},
+                         ]},
+                    ],
+                })
+            downloader_block = {
+                "component": "VCard",
+                "props": {"variant": "outlined"},
+                "content": [
+                    {"component": "VCardTitle",
+                     "props": {"class": "text-subtitle-1 font-weight-bold d-flex align-center"},
+                     "content": [
+                         {"component": "VIcon",
+                          "props": {"size": "small", "class": "mr-2 text-warning"},
+                          "text": "mdi-server-network"},
+                         {"component": "span", "text": "各下载器分布"},
+                     ]},
+                    {"component": "VDivider"},
+                    {"component": "VList",
+                     "props": {"lines": "three", "density": "comfortable"},
+                     "content": list_items},
+                ],
+            }
+        else:
+            downloader_block = {
+                "component": "VCard",
+                "props": {"variant": "outlined"},
+                "content": [
+                    {"component": "VCardTitle",
+                     "props": {"class": "text-subtitle-1 font-weight-bold"},
+                     "text": "各下载器分布"},
+                    {"component": "VCardText",
+                     "props": {"class": "text-center text-medium-emphasis py-8"},
+                     "text": "插件尚未实际删除过种子，运行后将在此展示分布"},
+                ],
+            }
+
+        # --- 4. 最近运行记录 ---
+        if recent_runs:
+            rows = []
+            for r in reversed(recent_runs[-10:]):
+                rows.append({
+                    "component": "tr",
+                    "content": [
+                        {"component": "td",
+                         "props": {"class": "text-body-2"},
+                         "text": r.get("timestamp", "")},
+                        {"component": "td",
+                         "props": {"class": "text-right"},
+                         "content": [
+                             {"component": "VChip",
+                              "props": {"size": "small", "color": "primary",
+                                        "variant": "tonal"},
+                              "text": f"{r.get('deleted', 0)}"},
+                         ]},
+                        {"component": "td",
+                         "props": {"class": "text-right"},
+                         "content": [
+                             {"component": "VChip",
+                              "props": {"size": "small", "color": "error",
+                                        "variant": "tonal"},
+                              "text": f"{r.get('files_deleted', 0)}"},
+                         ]},
+                    ],
+                })
+            recent_block = {
+                "component": "VCard",
+                "props": {"variant": "outlined"},
+                "content": [
+                    {"component": "VCardTitle",
+                     "props": {"class": "text-subtitle-1 font-weight-bold d-flex align-center"},
+                     "content": [
+                         {"component": "VIcon",
+                          "props": {"size": "small", "class": "mr-2 text-info"},
+                          "text": "mdi-history"},
+                         {"component": "span", "text": f"最近运行记录（最近 {len(rows)} 次）"},
+                     ]},
+                    {"component": "VDivider"},
+                    {"component": "VTable",
+                     "props": {"density": "comfortable"},
+                     "content": [
+                         {"component": "thead",
+                          "content": [
+                              {"component": "tr",
+                               "content": [
+                                   {"component": "th",
+                                    "props": {"class": "text-left"},
+                                    "text": "时间"},
+                                   {"component": "th",
+                                    "props": {"class": "text-right"},
+                                    "text": "删种"},
+                                   {"component": "th",
+                                    "props": {"class": "text-right"},
+                                    "text": "删文件"},
+                               ]},
+                          ]},
+                         {"component": "tbody", "content": rows},
+                     ]},
+                ],
+            }
+        else:
+            recent_block = {
+                "component": "VCard",
+                "props": {"variant": "outlined"},
+                "content": [
+                    {"component": "VCardTitle",
+                     "props": {"class": "text-subtitle-1 font-weight-bold"},
+                     "text": "最近运行记录"},
+                    {"component": "VCardText",
+                     "props": {"class": "text-center text-medium-emphasis py-8"},
+                     "text": "暂无数据"},
+                ],
+            }
+
+        # --- 拼装最终页面 ---
         return [{
             "component": "VContainer",
             "props": {"class": "pa-4", "fluid": True},
-            "content": [{
-                "component": "VRow",
-                "props": {"dense": True},
-                "content": [{
-                    "component": "VCol",
-                    "props": {"cols": 12, "md": 6},
-                    "content": cards[:2],
-                }, {
-                    "component": "VCol",
-                    "props": {"cols": 12, "md": 6},
-                    "content": cards[2:],
-                }],
-            }],
+            "content": [
+                # 顶部 4 个统计卡
+                {"component": "VRow",
+                 "props": {"dense": True},
+                 "content": [
+                    {"component": "VCol", "props": {"cols": 6, "md": 3},
+                     "content": [stat_cards[0]]},
+                    {"component": "VCol", "props": {"cols": 6, "md": 3},
+                     "content": [stat_cards[1]]},
+                    {"component": "VCol", "props": {"cols": 6, "md": 3},
+                     "content": [stat_cards[2]]},
+                    {"component": "VCol", "props": {"cols": 6, "md": 3},
+                     "content": [stat_cards[3]]},
+                 ]},
+                # 上次/下次时间卡
+                {"component": "VRow",
+                 "props": {"class": "mt-2", "dense": True},
+                 "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6},
+                     "content": [last_card]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6},
+                     "content": [next_card]},
+                 ]},
+                # 各下载器分布
+                {"component": "VRow",
+                 "props": {"class": "mt-2", "dense": True},
+                 "content": [
+                    {"component": "VCol", "props": {"cols": 12},
+                     "content": [downloader_block]},
+                 ]},
+                # 最近运行记录
+                {"component": "VRow",
+                 "props": {"class": "mt-2", "dense": True},
+                 "content": [
+                    {"component": "VCol", "props": {"cols": 12},
+                     "content": [recent_block]},
+                 ]},
+            ],
         }]
+
+    @staticmethod
+    def _humanize_delta(ts_str: str) -> str:
+        """把 'YYYY-MM-DD HH:MM:SS' 转成 'X 分钟前'。"""
+        try:
+            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            delta = datetime.now() - ts
+            seconds = int(delta.total_seconds())
+            if seconds < 0:
+                return "刚刚"
+            if seconds < 60:
+                return f"{seconds} 秒前"
+            if seconds < 3600:
+                return f"{seconds // 60} 分钟前"
+            if seconds < 86400:
+                return f"{seconds // 3600} 小时前"
+            return f"{seconds // 86400} 天前"
+        except Exception:
+            return ""
