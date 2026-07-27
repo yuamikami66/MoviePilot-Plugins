@@ -1,5 +1,5 @@
 """
-AutoRemoveInactive - 30分钟无活动自动清理
+AutoRemoveInactive - 种子自动删除
 自动删除下载器中长时间无活动的种子；如存在其他辅种，仅删种不删文件。
 """
 import time
@@ -18,13 +18,13 @@ from app.schemas.system import ServiceInfo
 
 class AutoRemoveInactive(_PluginBase):
     """
-    30分钟无活动自动清理。
+    种子自动删除。
     自动删除下载器中长时间无活动的种子。
     当同下载器内存在其他文件路径重叠的种子（辅种）时，仅删种不删文件，避免影响其他辅种。
     支持 qBittorrent 与 Transmission。
     """
 
-    plugin_name = "30分钟无活动自动清理"
+    plugin_name = "种子自动删除"
     plugin_desc = "自动删除下载器中长时间无活动的种子，存在其他辅种时仅删种不删文件"
     plugin_icon = "cleanup.png"
     plugin_version = "1.0.0"
@@ -113,7 +113,7 @@ class AutoRemoveInactive(_PluginBase):
         return [
             {
                 "id": "AutoRemoveInactive",
-                "name": "30分钟无活动自动清理",
+                "name": "种子自动删除",
                 "trigger": trigger,
                 "func": self._safe_run,
                 "kwargs": {},
@@ -457,7 +457,7 @@ class AutoRemoveInactive(_PluginBase):
         try:
             self.post_message(
                 mtype=NotificationType.Plugin,
-                title=f"30分钟无活动自动清理 共 {total_with + total_only} 条",
+                title=f"种子自动删除 共 {total_with + total_only} 条",
                 text=text[:3500],
             )
         except Exception as err:
