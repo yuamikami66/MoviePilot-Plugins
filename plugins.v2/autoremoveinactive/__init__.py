@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.helper.downloader import DownloaderHelper
+from app.helper.service import ServiceConfigHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
@@ -39,6 +40,7 @@ class AutoRemoveInactive(_PluginBase):
     # ---------------- 私有属性 ---------------- #
     _enabled: bool = False
     _notify: bool = True
+    _notify_channel: str = "插件"
     _cron: str = "*/20 * * * *"
     _downloaders: List[str] = []
     _inactive_minutes: int = 30
@@ -65,6 +67,23 @@ class AutoRemoveInactive(_PluginBase):
 
         self._enabled = to_bool(config.get("enabled"))
         self._notify = to_bool(config.get("notify", True))
+        # 通知渠道：默认 "插件"，并校验是否在已启用的通知渠道列表里
+        notify_channel_raw = (config.get("notify_channel") or "插件").strip()
+        valid_channels: List[str] = []
+        try:
+            for cfg in ServiceConfigHelper.get_notification_configs():
+                if getattr(cfg, "enabled", False):
+                    valid_channels.append(cfg.name)
+        except Exception as err:
+            logger.warning(f"AutoRemoveInactive 拉取通知渠道列表失败: {err}")
+        if valid_channels and notify_channel_raw not in valid_channels:
+            logger.warning(
+                f"AutoRemoveInactive 通知渠道 '{notify_channel_raw}' "
+                f"不存在或未启用，回退到默认 '插件'"
+            )
+            self._notify_channel = "插件"
+        else:
+            self._notify_channel = notify_channel_raw or "插件"
         self._cron = (config.get("cron") or "*/20 * * * *").strip()
         # 兼容 list / dict / 单值 - 插件持久化时可能改变类型
         raw_downloaders = config.get("downloaders")
@@ -185,6 +204,18 @@ class AutoRemoveInactive(_PluginBase):
         except Exception as err:
             logger.warning(f"AutoRemoveInactive 拉取下载器列表失败: {err}")
 
+        # 通知渠道选项：只列出已启用的渠道
+        notify_channel_options: List[dict] = []
+        try:
+            for cfg in ServiceConfigHelper.get_notification_configs():
+                if getattr(cfg, "enabled", False):
+                    notify_channel_options.append({"title": cfg.name, "value": cfg.name})
+        except Exception as err:
+            logger.warning(f"AutoRemoveInactive 拉取通知渠道列表失败: {err}")
+        # 兜底：保证下拉框至少有 "插件" 选项
+        if not any(opt["value"] == "插件" for opt in notify_channel_options):
+            notify_channel_options.append({"title": "插件", "value": "插件"})
+
         return [
             {
                 "component": "VForm",
@@ -211,6 +242,22 @@ class AutoRemoveInactive(_PluginBase):
                                 "props": {"cols": 12, "md": 4},
                                 "content": [{"component": "VSwitch", "props": {
                                     "model": "onlyonce", "label": "保存后立即运行一次",
+                                }}],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{"component": "VSelect", "props": {
+                                    "model": "notify_channel",
+                                    "label": "通知渠道",
+                                    "items": notify_channel_options,
+                                    "hint": "选择发送本插件通知的渠道。仅启用此消息类型开关的渠道可被选中。",
+                                    "persistentHint": True,
                                 }}],
                             },
                         ],
@@ -327,6 +374,7 @@ class AutoRemoveInactive(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "notify": True,
+            "notify_channel": "插件",
             "cron": "*/20 * * * *",
             "downloaders": [],
             "inactive_minutes": 30,
@@ -585,6 +633,7 @@ class AutoRemoveInactive(_PluginBase):
                 mtype=NotificationType.Plugin,
                 title="种子自动删除 - 执行完成",
                 text=text[:3500],
+                source=self._notify_channel,
             )
         except Exception as err:
             logger.error(f"AutoRemoveInactive 发送通知失败: {err}")
