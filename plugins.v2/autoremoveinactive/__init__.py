@@ -26,9 +26,12 @@ class AutoRemoveInactive(_PluginBase):
     """
 
     plugin_name = "种子自动删除"
-    plugin_desc = "自动删除下载器中长时间无活动的种子；存在其他辅种时仅删种不删文件。支持标签过滤（包含/排除）。"
+    plugin_desc = (
+        "自动删除下载器中长时间无活动的种子，或所有 tracker 都失联的种子；"
+        "存在其他辅种时仅删种不删文件。支持标签过滤（包含/排除）。"
+    )
     plugin_icon = "autoremoveinactive.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.2.0"
     plugin_label = "下载器"
     author_url = "https://github.com/yuamikami66/MoviePilot-Plugins"
     plugin_author = "jay"
@@ -48,6 +51,8 @@ class AutoRemoveInactive(_PluginBase):
     _delete_file_threshold_minutes: int = 30
     _include_tags: List[str] = []
     _exclude_tags: List[str] = []
+    _delete_dead_trackers: bool = False
+    _delete_dead_trackers_with_file: bool = False
     _running: bool = False
 
     # ---------------- 生命周期 ---------------- #
@@ -113,6 +118,13 @@ class AutoRemoveInactive(_PluginBase):
         # 标签过滤：换行 / 逗号都支持，解析为 list[str]（去重、去空）
         self._include_tags = self._parse_tag_list(config.get("include_tags"))
         self._exclude_tags = self._parse_tag_list(config.get("exclude_tags"))
+        # tracker 失联立即删配置（独立于时间阈值，匹配即删；标签过滤复用上面 include/exclude_tags）
+        self._delete_dead_trackers = to_bool(
+            config.get("delete_dead_trackers", False)
+        )
+        self._delete_dead_trackers_with_file = to_bool(
+            config.get("delete_dead_trackers_with_file", False)
+        )
 
         # 修正历史脏数据：前端 form 提交时会把 bool/int 字段保存成字符串，
         # 且 downloaders 会被某层序列化成 {"item": "..."} dict。这里主动 merge 写回标准类型，
@@ -216,158 +228,270 @@ class AutoRemoveInactive(_PluginBase):
         if not any(opt["value"] == "插件" for opt in notify_channel_options):
             notify_channel_options.append({"title": "插件", "value": "插件"})
 
+        def _section(
+            title: str,
+            icon: str,
+            color: str,
+            content_blocks: List[dict],
+            subtitle: str = "",
+        ) -> dict:
+            """生成一个分组卡片：标题 + 副标题 + 内容区。"""
+            title_content: List[dict] = [
+                {"component": "VIcon",
+                 "props": {"size": "small", "class": f"mr-2 text-{color}"},
+                 "text": icon},
+                {"component": "span", "text": title},
+            ]
+            children: List[dict] = [{
+                "component": "VCardTitle",
+                "props": {
+                    "class": "text-subtitle-1 font-weight-bold pb-1 d-flex align-center",
+                },
+                "content": title_content,
+            }]
+            if subtitle:
+                children.append({
+                    "component": "VCardSubtitle",
+                    "props": {"class": "text-caption text-medium-emphasis pb-2"},
+                    "text": subtitle,
+                })
+            children.append({
+                "component": "VCardText",
+                "props": {"class": "pt-0 pb-4"},
+                "content": content_blocks,
+            })
+            return {
+                "component": "VCard",
+                "props": {"variant": "outlined", "class": "mb-4"},
+                "content": children,
+            }
+
+        # ---------- 1) 基础设置 ----------
+        basic_block = _section(
+            title="基础设置",
+            icon="mdi-cog-outline",
+            color="primary",
+            content_blocks=[{
+                "component": "VRow",
+                "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSwitch", "props": {
+                         "model": "enabled", "label": "启用插件",
+                         "color": "primary",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSwitch", "props": {
+                         "model": "notify", "label": "发送通知",
+                         "color": "primary",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSelect", "props": {
+                         "model": "notify_channel",
+                         "label": "通知渠道",
+                         "items": notify_channel_options,
+                         "density": "comfortable",
+                         "hideDetails": "auto",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSwitch", "props": {
+                         "model": "onlyonce", "label": "保存后立即运行一次",
+                         "color": "primary",
+                     }}]},
+                ],
+            }],
+        )
+
+        # ---------- 2) 调度与下载器 ----------
+        schedule_block = _section(
+            title="调度与下载器",
+            icon="mdi-calendar-clock",
+            color="info",
+            content_blocks=[{
+                "component": "VRow",
+                "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 8},
+                     "content": [{"component": "VSelect", "props": {
+                         "model": "downloaders",
+                         "label": "监控的下载器（多选）",
+                         "multiple": True,
+                         "chips": True,
+                         "closableChips": True,
+                         "items": downloader_options,
+                         "density": "comfortable",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4},
+                     "content": [{"component": "VTextField", "props": {
+                         "model": "cron",
+                         "label": "定时 Cron（5 位）",
+                         "placeholder": "*/20 * * * *",
+                         "density": "comfortable",
+                         "prependInnerIcon": "mdi-clock-outline",
+                     }}]},
+                ],
+            }],
+        )
+
+        # ---------- 3) 无活动清理 ----------
+        inactive_block = _section(
+            title="无活动清理",
+            icon="mdi-clock-alert-outline",
+            color="warning",
+            subtitle="按种子的最后活跃时间判断；命中后还需要标签过滤通过才会处理",
+            content_blocks=[{
+                "component": "VRow",
+                "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VTextField", "props": {
+                         "model": "inactive_minutes",
+                         "label": "删种阈值（分钟）",
+                         "type": "number",
+                         "min": 1,
+                         "density": "comfortable",
+                         "prependInnerIcon": "mdi-timer-sand",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VTextField", "props": {
+                         "model": "delete_file_threshold_minutes",
+                         "label": "删文件阈值（分钟）",
+                         "type": "number",
+                         "min": 1,
+                         "density": "comfortable",
+                         "prependInnerIcon": "mdi-file-clock-outline",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSwitch", "props": {
+                         "model": "delete_files_enabled",
+                         "label": "无辅种时同时删文件",
+                         "color": "warning",
+                         "hideDetails": "auto",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{
+                         "component": "VAlert",
+                         "props": {
+                             "type": "info",
+                             "variant": "tonal",
+                             "density": "compact",
+                             "class": "text-caption pa-2",
+                             "text": (
+                                 "无活动 ≥ 删种阈值 即被删种。"
+                                 "无辅种且无活动 ≥ 删文件阈值 时才允许同步删文件。"
+                             ),
+                         },
+                     }]},
+                ],
+            }],
+        )
+
+        # ---------- 4) Tracker 失联立即删除 ----------
+        dead_tracker_block = _section(
+            title="Tracker 失联立即删除",
+            icon="mdi-link-off",
+            color="error",
+            subtitle="不受时间阈值限制：扫描时命中即立即删除（标签过滤仍生效）",
+            content_blocks=[{
+                "component": "VRow",
+                "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSwitch", "props": {
+                         "model": "delete_dead_trackers",
+                         "label": "启用失联立即删除",
+                         "color": "error",
+                         "hideDetails": "auto",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [{"component": "VSwitch", "props": {
+                         "model": "delete_dead_trackers_with_file",
+                         "label": "无辅种时同时删文件",
+                         "color": "error",
+                         "hideDetails": "auto",
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6},
+                     "content": [{
+                         "component": "VAlert",
+                         "props": {
+                             "type": "info",
+                             "variant": "tonal",
+                             "density": "compact",
+                             "class": "text-caption pa-2",
+                             "text": (
+                                 "判定：qb 该种子所有 tracker.status ≠ 2(Working) 且 ≠ 3(Updating)；"
+                                 "tr 该种子所有 tracker.last_announce_succeeded=False 且 result ≠ Success。"
+                                 "空 tracker 列表视为无 tracker 目标，跳过。"
+                             ),
+                         },
+                     }]},
+                ],
+            }],
+        )
+
+        # ---------- 5) 标签过滤 ----------
+        tag_block = _section(
+            title="标签过滤",
+            icon="mdi-tag-multiple-outline",
+            color="success",
+            subtitle='白/黑名单同时作用于"无活动清理"和"Tracker 失联立即删除"',
+            content_blocks=[{
+                "component": "VRow",
+                "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6},
+                     "content": [{"component": "VTextarea", "props": {
+                         "model": "include_tags",
+                         "label": "只处理包含以下标签的种子（白名单）",
+                         "placeholder": "每行一个标签，或用逗号分隔。留空则处理所有种子。",
+                         "rows": 2,
+                         "noResize": True,
+                         "autoGrow": True,
+                         "density": "comfortable",
+                         "prependInnerIcon": "mdi-tag-check-outline",
+                         "hint": "支持 qBittorrent 与 Transmission 标签（tr 标签需在 MP 中标记）",
+                         "persistentHint": True,
+                     }}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6},
+                     "content": [{"component": "VTextarea", "props": {
+                         "model": "exclude_tags",
+                         "label": "排除含以下标签的种子（黑名单）",
+                         "placeholder": "每行一个标签，或用逗号分隔。",
+                         "rows": 2,
+                         "noResize": True,
+                         "autoGrow": True,
+                         "density": "comfortable",
+                         "prependInnerIcon": "mdi-tag-remove-outline",
+                         "hint": "例如填入「重要」可防止误删需要长期做种的内容",
+                         "persistentHint": True,
+                     }}]},
+                ],
+            }],
+        )
+
+        # ---------- 6) 底部总说明 ----------
+        footer_alert = {
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "class": "mt-2",
+                "icon": "mdi-information-outline",
+                "text": (
+                    '执行流程：每次按 Cron 触发 → 遍历下载器 → 先按无活动规则清理 → '
+                    '再按 Tracker 失联规则清理。\n'
+                    '辅种判定：同下载器内若存在其他文件路径重叠的种子，则只删种不删文件；'
+                    '否则按"无辅种时同时删文件"开关决定是否同步删文件。\n'
+                    '标签过滤：先按白名单筛种（命中任一即放行），再按黑名单过滤（命中任一即跳过）。'
+                ),
+            },
+        }
+
         return [
             {
                 "component": "VForm",
                 "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {
-                                    "model": "enabled", "label": "启用插件",
-                                }}],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {
-                                    "model": "notify", "label": "发送通知",
-                                }}],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {
-                                    "model": "onlyonce", "label": "保存后立即运行一次",
-                                }}],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [{"component": "VSelect", "props": {
-                                    "model": "notify_channel",
-                                    "label": "通知渠道",
-                                    "items": notify_channel_options,
-                                    "hint": "选择发送本插件通知的渠道。仅启用此消息类型开关的渠道可被选中。",
-                                    "persistentHint": True,
-                                }}],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 7},
-                                "content": [{"component": "VSelect", "props": {
-                                    "model": "downloaders",
-                                    "label": "监控的下载器（多选）",
-                                    "multiple": True,
-                                    "chips": True,
-                                    "items": downloader_options,
-                                }}],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 5},
-                                "content": [{"component": "VTextField", "props": {
-                                    "model": "cron",
-                                    "label": "定时 Cron（5 位）",
-                                    "placeholder": "*/20 * * * *",
-                                }}],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {
-                                    "model": "inactive_minutes",
-                                    "label": "删种阈值（分钟）",
-                                    "type": "number",
-                                    "min": 1,
-                                }}],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VSwitch", "props": {
-                                    "model": "delete_files_enabled",
-                                    "label": "无辅种时同时删文件",
-                                }}],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [{"component": "VTextField", "props": {
-                                    "model": "delete_file_threshold_minutes",
-                                    "label": "删文件阈值（分钟）",
-                                    "type": "number",
-                                    "min": 1,
-                                }}],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [{"component": "VTextarea", "props": {
-                                    "model": "include_tags",
-                                    "label": "只处理包含以下标签的种子",
-                                    "placeholder": "每行一个标签，或用逗号分隔。留空则处理所有种子。",
-                                    "rows": 2,
-                                    "noResize": True,
-                                    "hint": "支持 qBittorrent 与 Transmission 标签（tr 标签需在 MP 中标记）",
-                                    "persistentHint": True,
-                                }}],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [{"component": "VTextarea", "props": {
-                                    "model": "exclude_tags",
-                                    "label": "排除含以下标签的种子",
-                                    "placeholder": "每行一个标签，或用逗号分隔。",
-                                    "rows": 2,
-                                    "noResize": True,
-                                    "hint": "例如排除 \"重要\" 标签，防止误删需要长期做种的内容",
-                                    "persistentHint": True,
-                                }}],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "text": (
-                                "删种阈值：超过此时长无活动的种子会被删除。\n"
-                                "无辅种时同时删文件：开启后，会先判断同下载器内是否存在"
-                                "其他文件路径重叠的种子（辅种），有则只删种不删文件；"
-                                "无则按需同步删文件。\n"
-                                "删文件阈值：仅在无辅种时生效。无活动超过此时长才允许删文件，"
-                                "防止误删。\n"
-                                "标签过滤：先按\"包含标签\"白名单筛种，再按\"排除标签\"黑名单过滤。"
-                                "种子命中任一包含标签且不命中任何排除标签才会被处理。"
-                            ),
-                        },
-                    },
+                    basic_block,
+                    schedule_block,
+                    inactive_block,
+                    dead_tracker_block,
+                    tag_block,
+                    footer_alert,
                 ],
             }
         ], {
@@ -382,6 +506,8 @@ class AutoRemoveInactive(_PluginBase):
             "delete_file_threshold_minutes": 30,
             "include_tags": "",
             "exclude_tags": "",
+            "delete_dead_trackers": False,
+            "delete_dead_trackers_with_file": False,
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -417,17 +543,42 @@ class AutoRemoveInactive(_PluginBase):
                 results.append({
                     "downloader": name, "deleted_with_file": 0,
                     "deleted_only": 0, "matched": 0,
+                    "dead_tracker_matched": 0, "dead_tracker_deleted": 0,
+                    "dead_tracker_with_file": 0,
                     "error": "下载器未配置或不可用",
                 })
                 continue
             try:
+                # 1) 无活动清理（受时间阈值限制）
                 result = self._process_one(service)
+                # 2) tracker 失联立即清理（不受时间阈值限制）
+                if self._delete_dead_trackers:
+                    dead_result = self._process_dead_trackers(service)
+                    result["dead_tracker_matched"] = int(
+                        dead_result.get("dead_tracker_matched", 0)
+                    )
+                    result["dead_tracker_deleted"] = int(
+                        dead_result.get("dead_tracker_deleted", 0)
+                    )
+                    result["dead_tracker_with_file"] = int(
+                        dead_result.get("dead_tracker_with_file", 0)
+                    )
+                    result["dead_tracker_hashes"] = dead_result.get(
+                        "dead_tracker_hashes", []
+                    )
+                else:
+                    result["dead_tracker_matched"] = 0
+                    result["dead_tracker_deleted"] = 0
+                    result["dead_tracker_with_file"] = 0
                 results.append(result)
             except Exception as err:
                 logger.error(f"AutoRemoveInactive 处理 {name} 失败: {err}", exc_info=True)
                 results.append({
                     "downloader": name, "deleted_with_file": 0,
-                    "deleted_only": 0, "error": str(err),
+                    "deleted_only": 0, "matched": 0,
+                    "dead_tracker_matched": 0, "dead_tracker_deleted": 0,
+                    "dead_tracker_with_file": 0,
+                    "error": str(err),
                 })
 
         # 记录运行统计，供 get_page 详情页展示
@@ -524,6 +675,157 @@ class AutoRemoveInactive(_PluginBase):
             "with_file": del_with_file,
             "only": del_only,
         }
+
+    def _process_dead_trackers(self, service: ServiceInfo) -> Dict[str, Any]:
+        """处理单个下载器：扫描所有 tracker 全部失联的种子并立即删除（不受时间限制）。"""
+        instance = service.instance
+        is_qb = instance.__class__.__name__ == "Qbittorrent"
+        is_tr = instance.__class__.__name__ == "Transmission"
+        if not (is_qb or is_tr):
+            raise RuntimeError(f"不支持的下载器类型: {type(instance).__name__}")
+
+        # 拉种子
+        torrents_result = instance.get_torrents()
+        if isinstance(torrents_result, tuple):
+            torrents = torrents_result[0]
+        else:
+            torrents = torrents_result or []
+        if not torrents:
+            return {
+                "downloader": service.name,
+                "dead_tracker_matched": 0,
+                "dead_tracker_deleted": 0,
+                "dead_tracker_with_file": 0,
+                "dead_tracker_hashes": [],
+            }
+
+        # 拉每个种子的文件（用于辅种 overlap 判定）
+        file_index: Dict[str, Set[str]] = {}
+        for t in torrents:
+            h = self._get_hash(t, is_qb)
+            if not h:
+                continue
+            try:
+                file_index[h] = set(self._get_files(instance, h, is_qb))
+            except Exception as err:
+                logger.debug(f"AutoRemoveInactive 拉取种子 {h} 文件失败: {err}")
+                file_index[h] = set()
+
+        # 判定失联候选
+        dead_hashes: List[str] = []
+        for t in torrents:
+            h = self._get_hash(t, is_qb)
+            if not h:
+                continue
+            # 标签过滤（与无活动清理共用白/黑名单）
+            if not self._passes_tag_filter(self._get_tags(t, is_qb)):
+                continue
+            try:
+                is_dead = self._is_torrent_dead(instance, h, t, is_qb)
+            except Exception as err:
+                logger.debug(f"AutoRemoveInactive 判定种子 {h} tracker 失联失败: {err}")
+                continue
+            if is_dead:
+                dead_hashes.append(h)
+
+        if not dead_hashes:
+            return {
+                "downloader": service.name,
+                "dead_tracker_matched": 0,
+                "dead_tracker_deleted": 0,
+                "dead_tracker_with_file": 0,
+                "dead_tracker_hashes": [],
+            }
+
+        # 分类：有辅种 → 只删种；无辅种 → 按开关决定是否同步删文件
+        del_with_file: List[str] = []
+        del_only: List[str] = []
+        for h in dead_hashes:
+            my_files = file_index.get(h, set())
+            overlap = False
+            if my_files:
+                for other_h, other_files in file_index.items():
+                    if other_h == h or not other_files:
+                        continue
+                    if my_files & other_files:
+                        overlap = True
+                        break
+            if (not overlap) and self._delete_dead_trackers_with_file:
+                del_with_file.append(h)
+            else:
+                del_only.append(h)
+
+        # 执行删除
+        if del_with_file:
+            ok = instance.delete_torrents(delete_file=True, ids=del_with_file)
+            logger.info(
+                f"AutoRemoveInactive [{service.name}] tracker 失联 → 删种+删文件 "
+                f"{len(del_with_file)} 条: {'成功' if ok else '失败'}"
+            )
+        if del_only:
+            ok = instance.delete_torrents(delete_file=False, ids=del_only)
+            logger.info(
+                f"AutoRemoveInactive [{service.name}] tracker 失联 → 仅删种 "
+                f"{len(del_only)} 条: {'成功' if ok else '失败'}"
+            )
+
+        deleted = len(del_with_file) + len(del_only)
+        if deleted:
+            logger.info(
+                f"AutoRemoveInactive [{service.name}] tracker 失联清理完成: "
+                f"匹配 {len(dead_hashes)} 条, 实际删除 {deleted} 条"
+            )
+
+        return {
+            "downloader": service.name,
+            "dead_tracker_matched": len(dead_hashes),
+            "dead_tracker_deleted": deleted,
+            "dead_tracker_with_file": len(del_with_file),
+            "dead_tracker_hashes": dead_hashes,
+        }
+
+    def _is_torrent_dead(self, instance: Any, torrent_hash: str,
+                          torrent: Any, is_qb: bool) -> bool:
+        """判断单个种子是否所有 tracker 都失联。返回 True 即视为需要清理。"""
+        if is_qb:
+            try:
+                trackers = instance.qbc.torrents_trackers(torrent_hash=torrent_hash)
+            except Exception as err:
+                logger.debug(
+                    f"AutoRemoveInactive 拉取 qb tracker 失败 ({torrent_hash}): {err}"
+                )
+                return False
+            if not trackers:
+                # 没有 tracker 目标的种子不在本功能处理范围
+                return False
+            # qb tracker status: 0=Disabled, 1=Not contacted, 2=Working, 3=Updating, 4=Not working
+            # 视为失联：所有 tracker status 都 != 2（且不等于 3 Updating 中）
+            for t in trackers:
+                # 兼容 dict 与对象两种返回
+                if isinstance(t, dict):
+                    status = t.get("status")
+                else:
+                    status = getattr(t, "status", None)
+                try:
+                    status_int = int(status) if status is not None else None
+                except (TypeError, ValueError):
+                    status_int = None
+                if status_int in (2, 3):
+                    return False
+            return True
+
+        # transmission
+        tracker_stats = getattr(torrent, "tracker_stats", None) or []
+        if not tracker_stats:
+            return False
+        for stat in tracker_stats:
+            # 优先看 last_announce_succeeded；若无则用 last_announce_result
+            if getattr(stat, "last_announce_succeeded", False):
+                return False
+            result = getattr(stat, "last_announce_result", None)
+            if result == "Success":
+                return False
+        return True
 
     # ---------------- 适配层 ---------------- #
     @staticmethod
@@ -622,11 +924,18 @@ class AutoRemoveInactive(_PluginBase):
             int(r.get("deleted_with_file", 0)) + int(r.get("deleted_only", 0))
             for r in results
         )
-        if total_deleted == 0:
+        total_with = sum(int(r.get("deleted_with_file", 0)) for r in results)
+        total_dead = sum(
+            int(r.get("dead_tracker_deleted", 0) or 0) for r in results
+        )
+        total_dead_with = sum(
+            int(r.get("dead_tracker_with_file", 0) or 0) for r in results
+        )
+        if total_deleted == 0 and total_dead == 0:
             return
         text = (
-            f"- 匹配待清理种子：{total_matched}条\n"
-            f"- 清理种子：{total_deleted} 条"
+            f"- 无活动清理：删种 {total_deleted} 条 / 删文件 {total_with} 条\n"
+            f"- tracker 失联清理：删种 {total_dead} 条 / 删文件 {total_dead_with} 条"
         )
         try:
             self.post_message(
@@ -651,14 +960,32 @@ class AutoRemoveInactive(_PluginBase):
         total_files = total_with  # 仅"删种+删文件"路径会同时删文件
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        total_dead_matched = sum(
+            int(r.get("dead_tracker_matched", 0) or 0) for r in results
+        )
+        total_dead_deleted = sum(
+            int(r.get("dead_tracker_deleted", 0) or 0) for r in results
+        )
+        total_dead_with_file = sum(
+            int(r.get("dead_tracker_with_file", 0) or 0) for r in results
+        )
+
         by_downloader: Dict[str, int] = {}
         by_downloader_files: Dict[str, int] = {}
+        by_downloader_dead: Dict[str, int] = {}
+        by_downloader_dead_with_file: Dict[str, int] = {}
         for r in results:
             name = r.get("downloader") or "?"
             deleted = int(r.get("deleted_with_file", 0)) + int(r.get("deleted_only", 0))
             files = int(r.get("deleted_with_file", 0))
             by_downloader[name] = by_downloader.get(name, 0) + deleted
             by_downloader_files[name] = by_downloader_files.get(name, 0) + files
+            dead_deleted = int(r.get("dead_tracker_deleted", 0) or 0)
+            dead_with_file = int(r.get("dead_tracker_with_file", 0) or 0)
+            by_downloader_dead[name] = by_downloader_dead.get(name, 0) + dead_deleted
+            by_downloader_dead_with_file[name] = (
+                by_downloader_dead_with_file.get(name, 0) + dead_with_file
+            )
 
         try:
             stats = self.get_data(self._STATS_KEY) or {}
@@ -666,6 +993,12 @@ class AutoRemoveInactive(_PluginBase):
                 stats = {}
             stats["total_deleted"] = int(stats.get("total_deleted", 0)) + total_deleted
             stats["total_files_deleted"] = int(stats.get("total_files_deleted", 0)) + total_files
+            stats["total_dead_tracker_deleted"] = int(
+                stats.get("total_dead_tracker_deleted", 0)
+            ) + total_dead_deleted
+            stats["total_dead_tracker_with_file"] = int(
+                stats.get("total_dead_tracker_with_file", 0)
+            ) + total_dead_with_file
             stats["total_runs"] = int(stats.get("total_runs", 0)) + 1
 
             merged_dl = dict(stats.get("by_downloader", {}) or {})
@@ -678,12 +1011,27 @@ class AutoRemoveInactive(_PluginBase):
                 merged_files[k] = int(merged_files.get(k, 0)) + v
             stats["by_downloader_files"] = merged_files
 
+            merged_dead = dict(stats.get("by_downloader_dead_tracker", {}) or {})
+            for k, v in by_downloader_dead.items():
+                merged_dead[k] = int(merged_dead.get(k, 0)) + v
+            stats["by_downloader_dead_tracker"] = merged_dead
+
+            merged_dead_wf = dict(
+                stats.get("by_downloader_dead_tracker_with_file", {}) or {}
+            )
+            for k, v in by_downloader_dead_with_file.items():
+                merged_dead_wf[k] = int(merged_dead_wf.get(k, 0)) + v
+            stats["by_downloader_dead_tracker_with_file"] = merged_dead_wf
+
             stats["last_run"] = {
                 "timestamp": timestamp,
                 "deleted": total_deleted,
                 "files_deleted": total_files,
                 "matched": total_matched,
                 "by_downloader": by_downloader,
+                "dead_tracker_matched": total_dead_matched,
+                "dead_tracker_deleted": total_dead_deleted,
+                "dead_tracker_with_file": total_dead_with_file,
             }
             recent = list(stats.get("recent_runs", []) or [])
             recent.append({
@@ -691,13 +1039,18 @@ class AutoRemoveInactive(_PluginBase):
                 "deleted": total_deleted,
                 "files_deleted": total_files,
                 "matched": total_matched,
+                "dead_tracker_matched": total_dead_matched,
+                "dead_tracker_deleted": total_dead_deleted,
+                "dead_tracker_with_file": total_dead_with_file,
             })
             stats["recent_runs"] = recent[-self._STATS_RECENT_LIMIT:]
 
             self.save_data(self._STATS_KEY, stats)
             logger.info(
-                f"AutoRemoveInactive 统计已更新: 本次 {total_deleted} 条，"
-                f"累计 {stats['total_deleted']} 条 / 删文件 {stats['total_files_deleted']} 次"
+                f"AutoRemoveInactive 统计已更新: 本次 无活动 {total_deleted} 条 / "
+                f"tracker 失联 {total_dead_deleted} 条，"
+                f"累计 无活动 {stats['total_deleted']} 条 / "
+                f"tracker 失联 {stats['total_dead_tracker_deleted']} 条"
             )
         except Exception as err:
             logger.warning(f"AutoRemoveInactive 统计记录失败: {err}")
@@ -720,8 +1073,16 @@ class AutoRemoveInactive(_PluginBase):
         total_deleted = int(stats.get("total_deleted", 0))
         total_files = int(stats.get("total_files_deleted", 0))
         total_runs = int(stats.get("total_runs", 0))
+        total_dead = int(stats.get("total_dead_tracker_deleted", 0))
+        total_dead_with_file = int(stats.get("total_dead_tracker_with_file", 0))
         by_downloader: Dict[str, int] = stats.get("by_downloader", {}) or {}
         by_downloader_files: Dict[str, int] = stats.get("by_downloader_files", {}) or {}
+        by_downloader_dead: Dict[str, int] = (
+            stats.get("by_downloader_dead_tracker", {}) or {}
+        )
+        by_downloader_dead_wf: Dict[str, int] = (
+            stats.get("by_downloader_dead_tracker_with_file", {}) or {}
+        )
         last_run: Dict[str, Any] = stats.get("last_run", {}) or {}
         recent_runs: List[Dict[str, Any]] = stats.get("recent_runs", []) or []
         cron = (self._cron or "").strip() or "未配置"
@@ -791,12 +1152,14 @@ class AutoRemoveInactive(_PluginBase):
         def _info_line(klass: str, text: str) -> Dict[str, Any]:
             return {"component": "div", "props": {"class": klass}, "text": text}
 
-        # --- 1. 顶部 4 个大数字卡 ---
+        # --- 1. 顶部 4 个大数字卡 + 失联删种卡 ---
         stat_cards = [
             _stat_card(total_deleted, "累计删除种子", "primary",
                        f"覆盖 {len(by_downloader)} 个下载器" if by_downloader else "尚无数据"),
-            _stat_card(total_files, "同步删除文件", "error",
+            _stat_card(total_files, "删除文件", "error",
                        "仅统计无辅种时的实际删文件数"),
+            _stat_card(total_dead, "tracker 失联删种", "warning",
+                       f"删文件 {total_dead_with_file} 条 · 累计" if total_dead else "尚未触发"),
             _stat_card(total_runs, "运行次数", "info",
                        f"定时 {cron}"),
             _stat_card(monitored_count, "监控下载器", "success",
@@ -811,10 +1174,15 @@ class AutoRemoveInactive(_PluginBase):
                 f"删种 {last_run.get('deleted', 0)} 条"
                 f" / 删文件 {last_run.get('files_deleted', 0)} 条"
             )
+            last_dead_text = (
+                f"tracker 失联：删种 {last_run.get('dead_tracker_deleted', 0)} 条"
+                f" / 删文件 {last_run.get('dead_tracker_with_file', 0)} 条"
+            )
             last_content = [
                 _info_line("text-h4 font-weight-medium", last_text),
                 _info_line("text-caption text-medium-emphasis mt-1", last_delta),
                 _info_line("text-body-2 text-primary mt-3", last_stats_text),
+                _info_line("text-body-2 text-warning mt-1", last_dead_text),
             ]
         else:
             last_content = [
@@ -836,6 +1204,28 @@ class AutoRemoveInactive(_PluginBase):
             for name, count in sorted_dl:
                 pct = round(count * 100.0 / total_for_bar, 1)
                 files = int(by_downloader_files.get(name, 0))
+                dead = int(by_downloader_dead.get(name, 0))
+                dead_wf = int(by_downloader_dead_wf.get(name, 0))
+                chips = [
+                    {"component": "VChip",
+                     "props": {"size": "small", "color": "primary",
+                               "variant": "tonal", "class": "mr-2"},
+                     "text": f"删种 {count}"},
+                    {"component": "VChip",
+                     "props": {"size": "small", "color": "error",
+                               "variant": "tonal", "class": "mr-2"},
+                     "text": f"删文件 {files}"},
+                ]
+                if dead:
+                    chips.append({
+                        "component": "VChip",
+                        "props": {"size": "small", "color": "warning",
+                                  "variant": "tonal"},
+                        "text": (
+                            f"失联 {dead}"
+                            + (f"/删文件 {dead_wf}" if dead_wf else "")
+                        ),
+                    })
                 list_items.append({
                     "component": "VListItem",
                     "props": {"class": "px-2"},
@@ -846,17 +1236,7 @@ class AutoRemoveInactive(_PluginBase):
                              {"component": "span",
                               "props": {"class": "text-body-1 font-weight-medium"},
                               "text": name},
-                             {"component": "div",
-                              "content": [
-                                  {"component": "VChip",
-                                   "props": {"size": "small", "color": "primary",
-                                             "variant": "tonal", "class": "mr-2"},
-                                   "text": f"删种 {count}"},
-                                  {"component": "VChip",
-                                   "props": {"size": "small", "color": "error",
-                                             "variant": "tonal"},
-                                   "text": f"删文件 {files}"},
-                              ]},
+                             {"component": "div", "content": chips},
                          ]},
                         {"component": "VListItemSubtitle",
                          "props": {"class": "mt-2"},
@@ -927,6 +1307,22 @@ class AutoRemoveInactive(_PluginBase):
                                         "variant": "tonal"},
                               "text": f"{r.get('files_deleted', 0)}"},
                          ]},
+                        {"component": "td",
+                         "props": {"class": "text-right"},
+                         "content": [
+                             {"component": "VChip",
+                              "props": {"size": "small", "color": "warning",
+                                        "variant": "tonal"},
+                              "text": f"{r.get('dead_tracker_deleted', 0) or 0}"},
+                         ]},
+                        {"component": "td",
+                         "props": {"class": "text-right"},
+                         "content": [
+                             {"component": "VChip",
+                              "props": {"size": "small", "color": "warning",
+                                        "variant": "outlined"},
+                              "text": f"{r.get('dead_tracker_with_file', 0) or 0}"},
+                         ]},
                     ],
                 })
             recent_block = {
@@ -954,10 +1350,16 @@ class AutoRemoveInactive(_PluginBase):
                                     "text": "时间"},
                                    {"component": "th",
                                     "props": {"class": "text-right"},
-                                    "text": "删种"},
+                                    "text": "无活动删种"},
                                    {"component": "th",
                                     "props": {"class": "text-right"},
-                                    "text": "删文件"},
+                                    "text": "无活动删文件"},
+                                   {"component": "th",
+                                    "props": {"class": "text-right"},
+                                    "text": "失联删种"},
+                                   {"component": "th",
+                                    "props": {"class": "text-right"},
+                                    "text": "失联删文件"},
                                ]},
                           ]},
                          {"component": "tbody", "content": rows},
@@ -983,7 +1385,7 @@ class AutoRemoveInactive(_PluginBase):
             "component": "VContainer",
             "props": {"class": "pa-4", "fluid": True},
             "content": [
-                # 顶部 4 个统计卡
+                # 顶部 5 个统计卡（第一行 4 张 + 第二行 1 张）
                 {"component": "VRow",
                  "props": {"dense": True},
                  "content": [
@@ -995,6 +1397,12 @@ class AutoRemoveInactive(_PluginBase):
                      "content": [stat_cards[2]]},
                     {"component": "VCol", "props": {"cols": 6, "md": 3},
                      "content": [stat_cards[3]]},
+                 ]},
+                {"component": "VRow",
+                 "props": {"dense": True, "class": "mt-2"},
+                 "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3},
+                     "content": [stat_cards[4]]},
                  ]},
                 # 上次/下次时间卡
                 {"component": "VRow",
