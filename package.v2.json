@@ -1,16 +1,19 @@
 {
   "AutoRemoveInactive": {
     "name": "种子自动删除",
-    "description": "自动删除下载器中长时间无活动的种子；存在其他辅种时仅删种不删文件。支持 qBittorrent 和 Transmission。支持包含/排除标签过滤。",
+    "description": "自动删除下载器中长时间无活动的种子，或所有 tracker 都失联的种子；存在其他辅种时仅删种不删文件。支持 qBittorrent 和 Transmission。支持包含/排除标签过滤。",
     "labels": "下载器",
-    "version": "1.0.0",
+    "version": "1.2.0",
     "icon": "autoremoveinactive.png",
     "author": "yuamikami66",
     "author_url": "https://github.com/yuamikami66/MoviePilot-Plugins",
     "level": 1,
     "system_version": ">=2.12.0",
     "history": {
-      "v1.0.0": "初始版本：超过阈值无活动自动清理；支持多下载器、跨种子 overlap 判定、标签白/黑名单过滤、JSON 配置 + 通知 + 详情统计页"
+      "v1.0.0": "初始版本：超过阈值无活动自动清理；支持多下载器、跨种子 overlap 判定、标签白/黑名单过滤、JSON 配置 + 通知 + 详情统计页",
+      "v1.1.0": "新增 Tracker 失联立即删除功能：每次扫描检测所有 tracker 都失联的种子，匹配即立即删除（不受时间阈值限制）；支持独立白/黑名单标签；无辅种时可选择是否同步删文件",
+      "v1.1.1": "Tracker 失联清理改为复用无活动清理的 include/exclude 标签白/黑名单，去除冗余的独立配置项",
+      "v1.2.0": "配置页 UI 重设计：5 个 VCard 分组（基础设置 / 调度与下载器 / 无活动清理 / Tracker 失联立即删除 / 标签过滤），每组统一标题+图标+副标题样式，12 列栅格对齐，字段 prepend 图标 + 紧凑模式 + 局部 VAlert 说明"
     }
   }
 }
