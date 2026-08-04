@@ -36,3 +36,19 @@
 
 - 强制更新会让目标容器停服、重新拉镜像、重启，请评估对生产服务的影响
 - 仅信任 `host` / `secretKey` 来源；该密钥在 DC 服务端具有容器管理权限
+
+## 致谢 / Acknowledgements
+
+本插件（DC助手+）基于原作者 **gxterry** 的 [DC助手 / DockerCopilotHelper](https://github.com/gxterry/MoviePilot-Plugins) 开发而来。原作者搭建了完整的插件骨架、UI 表单、与 DockerCopilot 后端的 JWT 鉴权对接、以及 `haveUpdate` 驱动的自动更新流程——所有这些核心逻辑仍在 v1.5.0 中被保留和使用。
+
+在原插件基础上做的本地化改动：
+
+- 新增 `/dcfupdate` 强制更新命令与 `force_update` API
+- 新增 `forceupdatelist` UI 配置项，保存后自动触发一次强制更新并清空选项
+- 更新成功通知展示"旧镜像 → 新镜像"对比，浮动 tag 时给出核对提示
+- 修复进度追踪超时仍多 sleep 一次、镜像清理成功用 `logger.error`、`__update_config` 整体覆盖隐患等若干 bug
+- 规范化 `update_plugin_config` 工具序列化 list 产生的怪格式
+
+非常感谢 gxterry 把这个工具开源出来，让个人媒体中心用户可以方便地把 MoviePilot 跟 DockerCopilot 串起来，省掉很多手动维护容器版本的工作。如果你在使用中遇到问题，也欢迎在原仓库提 issue，作者维护很积极。
+
+如果你也基于本插件做了自己的魔改，欢迎互相交流改进思路。
