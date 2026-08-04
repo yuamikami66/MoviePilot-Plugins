@@ -15,5 +15,24 @@
       "v1.1.1": "Tracker 失联清理改为复用无活动清理的 include/exclude 标签白/黑名单，去除冗余的独立配置项",
       "v1.2.0": "配置页 UI 重设计：5 个 VCard 分组（基础设置 / 调度与下载器 / 无活动清理 / Tracker 失联立即删除 / 标签过滤），每组统一标题+图标+副标题样式，12 列栅格对齐，字段 prepend 图标 + 紧凑模式 + 局部 VAlert 说明"
     }
+  },
+  "DockerCopilotHelperJay": {
+    "name": "DC助手+",
+    "description": "配合 DockerCopilot 完成更新通知、自动更新、强制更新、备份功能",
+    "labels": "DC助手+",
+    "version": "1.5.0",
+    "icon": "https://raw.githubusercontent.com/yuamikami66/MoviePilot-Plugins/main/plugins/DockerCopilotHelperJay/Docker_Copilot.png",
+    "author": "yuamikami66",
+    "author_url": "https://github.com/yuamikami66/MoviePilot-Plugins",
+    "v2": true,
+    "level": 1,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.5.0": "重命名：plugin_name -> DC助手+；class/plugin_id -> DockerCopilotHelperJay；config_prefix -> dockercopilothelperjay_。需要卸载旧插件并迁移配置",
+      "v1.4.0": "更新成功通知展示旧镜像 → 新镜像对比；旧镜像 tag 浮动 (latest) 时提示核对实际版本",
+      "v1.3.0": "新增 UI 配置项 forceupdatelist + '强制更新'标签页；强制更新改为严格模式，仅对 forceupdatelist 中明确列出的容器生效",
+      "v1.2.0": "新增 /dcfupdate 强制更新命令 + force_update API；修复进度追踪超时仍多 sleep 一次、镜像清理成功用 logger.error、__update_config 整体覆盖隐患",
+      "v1.1.2": "初始本地化版本"
+    }
   }
 }
