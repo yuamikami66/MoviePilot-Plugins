@@ -1,0 +1,46 @@
+
+.sitebonus-app-page[data-v-f6223b00] {
+  padding: 16px;
+}
+.sortable-th[data-v-f6223b00] {
+  cursor: pointer;
+  user-select: none;
+}
+.sortable-th[data-v-f6223b00]:hover {
+  background: rgba(var(--v-theme-primary), 0.08);
+}
+.th-inner[data-v-f6223b00] {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.sort-icon[data-v-f6223b00] {
+  opacity: 0.55;
+}
+.sortable-th:hover .sort-icon[data-v-f6223b00] {
+  opacity: 1;
+}
+.summary-row[data-v-f6223b00] {
+  align-items: stretch;
+}
+.summary-grid[data-v-f6223b00] {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+@media (min-width: 960px) {
+.summary-grid[data-v-f6223b00] {
+    grid-template-columns: repeat(4, 1fr);
+}
+}
+.summary-card[data-v-f6223b00] {
+  height: 100%;
+  min-height: 110px;
+}
+.summary-text[data-v-f6223b00] {
+  height: 100%;
+}
+.summary-sub[data-v-f6223b00] {
+  min-height: 1.2em;
+  line-height: 1.2em;
+}
