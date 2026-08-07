@@ -1,0 +1,13 @@
+
+.sitebonus-dashboard[data-v-98b24acc] {
+  padding: 8px 0;
+}
+.metric-cell[data-v-98b24acc] {
+  min-width: 96px;
+  padding: 4px 12px;
+  border-radius: 6px;
+  background: rgba(var(--v-theme-primary), 0.06);
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 96px;
+}
