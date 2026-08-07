@@ -34,5 +34,18 @@
       "v1.2.0": "新增 /dcfupdate 强制更新命令 + force_update API；修复进度追踪超时仍多 sleep 一次、镜像清理成功用 logger.error、__update_config 整体覆盖隐患",
       "v1.1.2": "初始本地化版本"
     }
+  },
+  "SiteBonusMonitor": {
+    "name": "站点魔力值监控",
+    "description": "汇总所有启用站点的魔力值、做种数、做种体积与最近 24 小时时魔，支持详情页查看、定时通知与首页 Dashboard 卡片。",
+    "labels": "站点",
+    "version": "1.0.0",
+    "icon": "bonus.png",
+    "author": "local",
+    "level": 1,
+    "system_version": ">=2.12.0",
+    "history": {
+      "v1.0.0": "初始版本：详情页表格 + 定时通知 + Dashboard 卡片（时魔 Top + 魔力汇总）；时魔=最近 24h 最早与最新魔力值快照差值/小时"
+    }
   }
 }
